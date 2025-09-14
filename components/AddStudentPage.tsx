@@ -1,7 +1,7 @@
-
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import type { Page, Student, User, Course } from '../types';
 import { useCamera } from '../hooks/useCamera';
+import { supabase } from '../utils/supabaseClient';
 
 interface AddStudentPageProps {
   setPage: (page: Page) => void;
@@ -69,7 +69,7 @@ const AddStudentPage: React.FC<AddStudentPageProps> = ({
     startCamera();
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name || !id || !photo || !courseId) {
       setMessage({ text: 'Please fill all fields, select a course, and capture a photo.', type: 'error' });
@@ -92,117 +92,75 @@ const AddStudentPage: React.FC<AddStudentPageProps> = ({
       studentId: id,
     };
 
-    setStudents(prev => [...prev, newStudent]);
-    setUsers(prev => [...prev, newStudentUser]);
-    setLastAddedStudent(newStudent);
-    setMessage({ text: `Student ${name} added successfully! Their login is ${newStudentUser.email} with password 'password'.`, type: 'success' });
-    
-    setName('');
-    setId('');
-    setPhoto(null);
-    setCourseId('');
-    setTimeout(() => {
-        setLastAddedStudent(null);
-        setMessage(null);
-    }, 8000);
+    try {
+      // Insert into Supabase
+      const { error: studentError } = await supabase.from('students').insert([newStudent]);
+      if (studentError) throw studentError;
+
+      const { error: userError } = await supabase.from('users').insert([newStudentUser]);
+      if (userError) throw userError;
+
+      // Update local state
+      setStudents(prev => [...prev, newStudent]);
+      setUsers(prev => [...prev, newStudentUser]);
+      setLastAddedStudent(newStudent);
+      setMessage({ text: `Student ${name} added successfully! Their login is ${newStudentUser.email} with password 'password'.`, type: 'success' });
+      
+      setName('');
+      setId('');
+      setPhoto(null);
+      setCourseId('');
+      setTimeout(() => {
+          setLastAddedStudent(null);
+          setMessage(null);
+      }, 8000);
+    } catch (err: any) {
+      console.error("Error adding student:", err.message);
+      setMessage({ text: `Error: ${err.message}`, type: 'error' });
+    }
   };
 
   // --- Bulk Add Handlers ---
-  const handleStartOver = () => {
-    setBulkAddStep('UPLOAD');
-    setStudentsToRegister([]);
-    setCurrentStudentIndex(0);
-    setBulkMessage(null);
-    if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-    }
-    if (isCameraOn) {
-        stopCamera();
-    }
-  };
-
-  const handleDownloadSample = () => {
-    const csvContent = "data:text/csv;charset=utf-8,id,name,courseId\n101,John Doe,cs-101\n102,Jane Smith,ba-201";
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", "sample_students.csv");
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
     if (!file) return;
-
-    setBulkMessage(null);
+  
     const reader = new FileReader();
-    reader.onload = (e) => {
-        try {
-            const text = e.target?.result as string;
-            const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
-            if (lines.length < 2) throw new Error('CSV file must have a header and at least one student record.');
-
-            const header = lines[0].split(',').map(h => h.trim().toLowerCase());
-            const idIndex = header.indexOf('id');
-            const nameIndex = header.indexOf('name');
-            const courseIdIndex = header.indexOf('courseid');
-            if (idIndex === -1 || nameIndex === -1 || courseIdIndex === -1) throw new Error("CSV header must contain 'id', 'name', and 'courseId' columns.");
-
-            const newStudents: (Omit<Student, 'photo'> & { photo: string | null })[] = [];
-            const seenIds = new Set<string>();
-
-            for (let i = 1; i < lines.length; i++) {
-                const row = lines[i].split(',');
-                const studentId = row[idIndex]?.trim();
-                const studentName = row[nameIndex]?.trim();
-                const studentCourseId = row[courseIdIndex]?.trim();
-
-                if (!studentId || !studentName || !studentCourseId) throw new Error(`Error on line ${i + 1}: ID, Name, and CourseID cannot be empty.`);
-                if (students.some(s => s.id === studentId)) throw new Error(`Error on line ${i + 1}: Student ID '${studentId}' already exists in the system.`);
-                if (!courses.some(c => c.id === studentCourseId)) throw new Error(`Error on line ${i + 1}: Course ID '${studentCourseId}' is not a valid course.`);
-                if (seenIds.has(studentId)) throw new Error(`Error on line ${i + 1}: Duplicate Student ID '${studentId}' found in the CSV file.`);
-                
-                seenIds.add(studentId);
-                newStudents.push({ id: studentId, name: studentName, courseId: studentCourseId, photo: null });
-            }
-            
-            setStudentsToRegister(newStudents);
-            setBulkAddStep('CAPTURE');
-        } catch(err: any) {
-            setBulkMessage({ text: err.message, type: 'error' });
-            if (fileInputRef.current) fileInputRef.current.value = "";
-        }
+    reader.onload = (event) => {
+      const text = event.target?.result as string;
+      const lines = text.split('\n').filter(line => line.trim() !== '');
+  
+      const parsedStudents = lines.map(line => {
+        const [id, name, courseId] = line.split(',').map(part => part.trim());
+        return { id, name, courseId, photo: null };
+      });
+  
+      setStudentsToRegister(parsedStudents);
+      setBulkAddStep('CAPTURE');
     };
     reader.readAsText(file);
   };
 
-  const handleBulkCapture = () => {
+  const handleCaptureBulk = () => {
     const imageDataUrl = capturePhoto();
-    if (imageDataUrl) {
-        const updatedStudents = [...studentsToRegister];
-        updatedStudents[currentStudentIndex].photo = imageDataUrl;
-        setStudentsToRegister(updatedStudents);
-    }
-  };
+    if (imageDataUrl && currentStudentIndex < studentsToRegister.length) {
+      const updatedStudents = [...studentsToRegister];
+      updatedStudents[currentStudentIndex] = {
+        ...updatedStudents[currentStudentIndex],
+        photo: imageDataUrl,
+      };
+      setStudentsToRegister(updatedStudents);
 
-  const handleBulkRetake = () => {
-    const updatedStudents = [...studentsToRegister];
-    updatedStudents[currentStudentIndex].photo = null;
-    setStudentsToRegister(updatedStudents);
-  };
-
-  const handleConfirmAndNext = () => {
-    if (currentStudentIndex < studentsToRegister.length - 1) {
-        setCurrentStudentIndex(currentStudentIndex + 1);
-    } else {
+      if (currentStudentIndex + 1 < studentsToRegister.length) {
+        setCurrentStudentIndex(prev => prev + 1);
+      } else {
         stopCamera();
         setBulkAddStep('REVIEW');
+      }
     }
   };
 
-  const handleSaveAll = () => {
+  const handleSaveAll = async () => {
     const newStudents = studentsToRegister.filter(s => s.photo !== null) as Student[];
     const newUsers: User[] = newStudents.map(student => ({
         id: `user-${student.id}`,
@@ -212,219 +170,183 @@ const AddStudentPage: React.FC<AddStudentPageProps> = ({
         role: 'STUDENT',
         studentId: student.id,
     }));
-    setStudents(prev => [...prev, ...newStudents]);
-    setUsers(prev => [...prev, ...newUsers]);
-    setBulkMessage({ text: `${newStudents.length} students added successfully!`, type: 'success' });
-    setTimeout(() => {
-       handleStartOver();
-    }, 3000);
-  };
-  
-  const currentBulkStudent = studentsToRegister[currentStudentIndex];
 
-  const filteredStudents = useMemo(() => students.filter(student => 
-    student.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    student.id.toLowerCase().includes(searchQuery.toLowerCase())
-  ), [students, searchQuery]);
-  
+    try {
+      const { error: studentError } = await supabase.from('students').insert(newStudents);
+      if (studentError) throw studentError;
+
+      const { error: userError } = await supabase.from('users').insert(newUsers);
+      if (userError) throw userError;
+
+      setStudents(prev => [...prev, ...newStudents]);
+      setUsers(prev => [...prev, ...newUsers]);
+      setBulkMessage({ text: `${newStudents.length} students added successfully!`, type: 'success' });
+      setTimeout(() => {
+        handleStartOver();
+      }, 3000);
+    } catch (err: any) {
+      console.error("Error saving bulk students:", err.message);
+      setBulkMessage({ text: `Error: ${err.message}`, type: 'error' });
+    }
+  };
+
+  const handleStartOver = () => {
+    setBulkAddStep('UPLOAD');
+    setStudentsToRegister([]);
+    setCurrentStudentIndex(0);
+    setBulkMessage(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  // --- Filtered Students for Display ---
+  const filteredStudents = useMemo(() => {
+    return students.filter(s =>
+      s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      s.id.toLowerCase().includes(searchQuery.toLowerCase())
+    );
+  }, [students, searchQuery]);
 
   return (
-    <div className="max-w-6xl mx-auto">
-      <h2 className="text-3xl font-bold mb-6 text-cyan-400">Manage Students</h2>
-
-      <div className="flex border-b border-gray-700 mb-6">
-        <button onClick={() => setAddMode('SINGLE')} className={`py-2 px-4 font-semibold transition-colors duration-300 ${addMode === 'SINGLE' ? 'border-b-2 border-cyan-400 text-white' : 'text-gray-400 hover:text-white'}`}>
+    <div className="space-y-6">
+      <h2 className="text-3xl font-bold">Add Students</h2>
+      
+      <div className="flex space-x-4">
+        <button 
+          className={`px-4 py-2 rounded ${addMode === 'SINGLE' ? 'bg-blue-600' : 'bg-gray-600'}`}
+          onClick={() => setAddMode('SINGLE')}
+        >
           Add Single Student
         </button>
-        <button onClick={() => setAddMode('BULK')} className={`py-2 px-4 font-semibold transition-colors duration-300 ${addMode === 'BULK' ? 'border-b-2 border-cyan-400 text-white' : 'text-gray-400 hover:text-white'}`}>
-          Add Multiple Students
+        <button 
+          className={`px-4 py-2 rounded ${addMode === 'BULK' ? 'bg-blue-600' : 'bg-gray-600'}`}
+          onClick={() => setAddMode('BULK')}
+        >
+          Bulk Add Students
         </button>
       </div>
 
       {addMode === 'SINGLE' && (
-         <div className="grid md:grid-cols-2 gap-8">
-            <div className="bg-gray-800 p-6 rounded-lg shadow-lg">
-            <h3 className="text-xl font-semibold mb-4">Camera Feed</h3>
-            <div className="aspect-video bg-gray-900 rounded-md overflow-hidden relative">
-                {photo ? (
-                <img src={photo} alt="Captured student" className="w-full h-full object-cover" />
-                ) : (
-                <video ref={videoRef} autoPlay playsInline className={`w-full h-full object-cover scale-x-[-1] ${!isCameraOn && 'hidden'}`}></video>
-                )}
-                {!isCameraOn && !photo && (
-                <div className="absolute inset-0 flex items-center justify-center">
-                    <button onClick={startCamera} className="bg-cyan-500 hover:bg-cyan-600 text-white font-bold py-2 px-4 rounded transition-colors">
-                    Start Camera
-                    </button>
-                </div>
-                )}
-                {error && <p className="text-red-500 text-center absolute inset-0 flex items-center justify-center">{error}</p>}
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {message && (
+            <div className={`p-2 rounded ${message.type === 'error' ? 'bg-red-600' : 'bg-green-600'}`}>
+              {message.text}
             </div>
-            <canvas ref={canvasRef} className="hidden"></canvas>
-            <div className="mt-4 flex justify-center space-x-4">
-                {isCameraOn && !photo && (
-                <button onClick={handleCapture} className="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded w-full">
-                    Capture Photo
-                </button>
-                )}
-                {photo && (
-                <button onClick={handleRetake} className="bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-2 px-4 rounded w-full">
-                    Retake
-                </button>
-                )}
-            </div>
-            </div>
-    
-            <div className="bg-gray-800 p-6 rounded-lg shadow-lg">
-            <h3 className="text-xl font-semibold mb-4">Student Details</h3>
-            <form onSubmit={handleSubmit} className="space-y-4">
-                 <div>
-                    <label htmlFor="student-id" className="block text-sm font-medium text-gray-300">Student ID</label>
-                    <input type="text" id="student-id" value={id} onChange={(e) => setId(e.target.value)} className="mt-1 block w-full bg-gray-700 border border-gray-600 rounded-md shadow-sm py-2 px-3 text-white focus:outline-none focus:ring-cyan-500 focus:border-cyan-500" required />
-                </div>
-                <div>
-                    <label htmlFor="student-name" className="block text-sm font-medium text-gray-300">Student Name</label>
-                    <input type="text" id="student-name" value={name} onChange={(e) => setName(e.target.value)} className="mt-1 block w-full bg-gray-700 border border-gray-600 rounded-md shadow-sm py-2 px-3 text-white focus:outline-none focus:ring-cyan-500 focus:border-cyan-500" required />
-                </div>
-                <div>
-                    <label htmlFor="course-select" className="block text-sm font-medium text-gray-300">Course</label>
-                    <select id="course-select" value={courseId} onChange={e => setCourseId(e.target.value)} className="mt-1 block w-full bg-gray-700 border border-gray-600 rounded-md shadow-sm py-2 px-3 text-white focus:outline-none focus:ring-cyan-500 focus:border-cyan-500" required>
-                        <option value="">Select a Course</option>
-                        {courses.map(course => <option key={course.id} value={course.id}>{course.name}</option>)}
-                    </select>
-                </div>
+          )}
 
-                {message && (
-                <div className={`p-3 rounded-md text-sm ${message.type === 'error' ? 'bg-red-900 text-red-200' : 'bg-green-900 text-green-200'}`}>
-                    {message.text}
-                </div>
-                )}
-               
-                <button type="submit" disabled={!photo || !name || !id || !courseId} className="w-full bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-2 px-4 rounded disabled:bg-gray-600 disabled:cursor-not-allowed transition-colors">
-                 Add Student
+          <div>
+            <label className="block mb-1">Student ID</label>
+            <input 
+              type="text" 
+              value={id} 
+              onChange={e => setId(e.target.value)} 
+              className="w-full p-2 rounded bg-gray-800 border border-gray-700"
+            />
+          </div>
+          <div>
+            <label className="block mb-1">Name</label>
+            <input 
+              type="text" 
+              value={name} 
+              onChange={e => setName(e.target.value)} 
+              className="w-full p-2 rounded bg-gray-800 border border-gray-700"
+            />
+          </div>
+          <div>
+            <label className="block mb-1">Course</label>
+            <select
+              value={courseId}
+              onChange={e => setCourseId(e.target.value)}
+              className="w-full p-2 rounded bg-gray-800 border border-gray-700"
+            >
+              <option value="">Select Course</option>
+              {courses.map(c => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block mb-1">Photo</label>
+            {photo ? (
+              <div>
+                <img src={photo} alt="Captured" className="w-32 h-32 object-cover rounded" />
+                <button type="button" onClick={handleRetake} className="mt-2 px-3 py-1 bg-yellow-600 rounded">
+                  Retake
                 </button>
-            </form>
-            </div>
-      </div>
+              </div>
+            ) : (
+              <div>
+                {isCameraOn ? (
+                  <div>
+                    <video ref={videoRef} autoPlay className="w-64 h-48 bg-black rounded" />
+                    <canvas ref={canvasRef} className="hidden" />
+                    <button type="button" onClick={handleCapture} className="mt-2 px-3 py-1 bg-green-600 rounded">
+                      Capture
+                    </button>
+                  </div>
+                ) : (
+                  <button type="button" onClick={startCamera} className="px-3 py-1 bg-blue-600 rounded">
+                    Start Camera
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
+          <button type="submit" className="px-4 py-2 bg-blue-600 rounded">Add Student</button>
+        </form>
       )}
 
       {addMode === 'BULK' && (
-        <div className="bg-gray-800 p-6 rounded-lg shadow-lg min-h-[400px]">
+        <div>
           {bulkMessage && (
-            <div className={`p-3 mb-4 rounded-md text-sm ${bulkMessage.type === 'error' ? 'bg-red-900 text-red-200' : 'bg-green-900 text-green-200'}`}>
-                {bulkMessage.text}
+            <div className={`p-2 rounded ${bulkMessage.type === 'error' ? 'bg-red-600' : 'bg-green-600'}`}>
+              {bulkMessage.text}
             </div>
           )}
-
           {bulkAddStep === 'UPLOAD' && (
             <div>
-              <h3 className="text-xl font-semibold mb-4">Step 1: Upload CSV</h3>
-              <p className="text-gray-400 mb-4">Upload a CSV file with 'id', 'name', and 'courseId' columns for the students you want to add.</p>
-              <div className="border-2 border-dashed border-gray-600 rounded-lg p-8 text-center">
-                <UploadIcon />
-                <input type="file" accept=".csv" onChange={handleFileChange} ref={fileInputRef} className="block w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-cyan-600 file:text-white hover:file:bg-cyan-700"/>
-              </div>
-              <div className="mt-4 text-center">
-                <button onClick={handleDownloadSample} className="text-cyan-400 hover:text-cyan-300 text-sm">Download sample.csv</button>
-              </div>
+              <input 
+                type="file" 
+                accept=".csv" 
+                ref={fileInputRef}
+                onChange={handleFileUpload} 
+                className="mb-4"
+              />
+              <p className="text-sm text-gray-400">CSV format: id,name,courseId</p>
             </div>
           )}
-          
-          {bulkAddStep === 'CAPTURE' && currentBulkStudent && (
+          {bulkAddStep === 'CAPTURE' && (
             <div>
-              <h3 className="text-xl font-semibold mb-2">Step 2: Capture Photos</h3>
-              <p className="text-lg font-bold text-cyan-400">{`Student ${currentStudentIndex + 1} of ${studentsToRegister.length}: ${currentBulkStudent.name} (${currentBulkStudent.id})`}</p>
-              <div className="aspect-video bg-gray-900 rounded-md overflow-hidden relative mt-4">
-                 {currentBulkStudent.photo ? ( <img src={currentBulkStudent.photo} alt={`Capture for ${currentBulkStudent.name}`} className="w-full h-full object-cover" />) : (<video ref={videoRef} autoPlay playsInline className={`w-full h-full object-cover scale-x-[-1] ${!isCameraOn && 'hidden'}`}></video>)}
-                 {error && <p className="text-red-500 text-center absolute inset-0 flex items-center justify-center">{error}</p>}
-              </div>
-              <canvas ref={canvasRef} className="hidden"></canvas>
-              <div className="mt-4 flex justify-center space-x-4">
-                {!currentBulkStudent.photo ? (<button onClick={handleBulkCapture} disabled={!isCameraOn} className="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded w-1/3 disabled:bg-gray-600">Capture</button>) : (
-                    <>
-                        <button onClick={handleBulkRetake} className="bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-2 px-4 rounded w-1/3">Retake</button>
-                        <button onClick={handleConfirmAndNext} className="bg-cyan-500 hover:bg-cyan-600 text-white font-bold py-2 px-4 rounded w-1/3">
-                            {currentStudentIndex < studentsToRegister.length - 1 ? 'Confirm & Next' : 'Finish & Review'}
-                        </button>
-                    </>
-                )}
-              </div>
+              <h3 className="mb-2">Capture photo for: {studentsToRegister[currentStudentIndex]?.name}</h3>
+              <video ref={videoRef} autoPlay className="w-64 h-48 bg-black rounded" />
+              <canvas ref={canvasRef} className="hidden" />
+              <button onClick={handleCaptureBulk} className="mt-2 px-3 py-1 bg-green-600 rounded">Capture</button>
             </div>
           )}
-          
           {bulkAddStep === 'REVIEW' && (
-             <div>
-                <h3 className="text-xl font-semibold mb-4">Step 3: Review & Save</h3>
-                <p className="text-gray-400 mb-4">Review the students and their captured photos before adding them to the system.</p>
-                <div className="space-y-3 max-h-80 overflow-y-auto pr-2">
-                  {studentsToRegister.map(student => (
-                    <div key={student.id} className="bg-gray-700 p-3 rounded-md flex items-center space-x-4">
-                        <img src={student.photo!} alt={student.name} className="w-16 h-16 rounded-lg object-cover border-2 border-gray-500" />
-                        <div>
-                           <p className="font-semibold text-white">{student.name}</p>
-                           <p className="text-sm text-gray-400">ID: {student.id}</p>
-                        </div>
-                    </div>
-                  ))}
-                </div>
-                <div className="mt-6 flex justify-end space-x-4">
-                    <button onClick={handleStartOver} className="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded">Start Over</button>
-                    <button onClick={handleSaveAll} className="bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-2 px-4 rounded">Save All Students</button>
-                </div>
+            <div>
+              <h3 className="mb-2">Review Students</h3>
+              <ul className="space-y-2">
+                {studentsToRegister.map(s => (
+                  <li key={s.id} className="flex items-center space-x-2">
+                    {s.photo ? <img src={s.photo} alt={s.name} className="w-12 h-12 rounded" /> : <span>No Photo</span>}
+                    <span>{s.name} ({s.id})</span>
+                  </li>
+                ))}
+              </ul>
+              <button onClick={handleSaveAll} className="mt-4 px-4 py-2 bg-blue-600 rounded">Save All</button>
             </div>
           )}
         </div>
       )}
 
-      <div className="mt-12">
-        <h3 className="text-2xl font-bold mb-4 text-cyan-400">Registered Students</h3>
-        <div className="mb-4">
-          <input type="search" placeholder="Search students by name or ID..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} className="w-full bg-gray-700 border border-gray-600 rounded-md shadow-sm py-2 px-3 text-white focus:outline-none focus:ring-cyan-500 focus:border-cyan-500"/>
-        </div>
-        <div className="bg-gray-800 rounded-lg shadow-lg overflow-hidden">
-          {filteredStudents.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left">
-                <thead className="text-xs text-gray-400 uppercase bg-gray-700">
-                  <tr>
-                    <th scope="col" className="px-6 py-3">Photo</th>
-                    <th scope="col" className="px-6 py-3">Student Name</th>
-                    <th scope="col" className="px-6 py-3">Student ID</th>
-                    <th scope="col" className="px-6 py-3">Course</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredStudents.map(student => (
-                    <tr key={student.id} className="bg-gray-800 border-b border-gray-700 hover:bg-gray-600">
-                      <td className="px-6 py-4"><img src={student.photo} alt={student.name} className="w-12 h-12 rounded-full object-cover"/></td>
-                      <td className="px-6 py-4 font-medium text-white">{student.name}</td>
-                      <td className="px-6 py-4 text-gray-300">{student.id}</td>
-                      <td className="px-6 py-4 text-gray-300">{courses.find(c => c.id === student.courseId)?.name || 'N/A'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <p className="text-gray-500 text-center p-8">
-              {searchQuery ? `No students found for "${searchQuery}".` : 'No students have been added yet.'}
-            </p>
-          )}
-        </div>
-      </div>
-
-      <button onClick={() => setPage('ADMIN_DASHBOARD')} className="mt-8 bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded transition-colors">
+      <button onClick={() => setPage('ADMIN_DASHBOARD')} className="mt-6 px-4 py-2 bg-gray-600 rounded">
         Back to Dashboard
       </button>
     </div>
   );
 };
-
-const UploadIcon = () => (
-    <svg className="mx-auto h-12 w-12 text-gray-500" stroke="currentColor" fill="none" viewBox="0 0 48 48" aria-hidden="true">
-        <path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-);
-
 
 export default AddStudentPage;
