@@ -1,0 +1,8 @@
+{
+  "name": "Copy of Face Recognition Attendance System",
+  "description": "A web-based attendance system using simulated face recognition. Add students, capture their photos, and take attendance through a camera feed. Attendance records are saved locally.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ]
+}
